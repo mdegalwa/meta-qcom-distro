@@ -1,0 +1,90 @@
+Subject: [PATCH] net/stmmac: add cache maintenance for a non-coherent DMA
+
+The Shikra EMAC DMA is not cache-coherent. Replace the no-op cache hooks in
+stmmac_regs.h with arm64 implementations:
+- stmmac_dcache_clean(): DC CVAC over the range, then DSB SY. Used where the
+  CPU writes data the DMA will read (TX payloads, descriptors).
+- stmmac_dcache_flush(): DC CIVAC over the range, then DSB SY. Used where the
+  DMA writes data the CPU will read (RX payloads, buffers before DMA writes).
+- stmmac_dcache_inval_line(): DC CIVAC on one descriptor line, then a read
+  barrier. Used before reading descriptor write-back.
+
+On a coherent platform, leave this patch out. The PMD then runs with the
+no-op hooks from the base patch.
+
+Upstream-Status: Inappropriate [Qualcomm-specific platform driver, not intended for upstream DPDK]
+
+---
+ drivers/net/stmmac/stmmac_regs.h | 
+52
+ 
+++++++++++++++++++++++++++++++
+----------------------
+ 1 file changed, 
+30
+ insertions(+), 
+22
+ deletions(-)
+
+diff --git a/drivers/net/stmmac/stmmac_regs.h b/drivers/net/stmmac/stmmac_regs.h
+--- a/drivers/net/stmmac/stmmac_regs.h
++++ b/drivers/net/stmmac/stmmac_regs.h
+@@ -167,28 +167,36 @@
+ #define STMMAC_DESCS_PER_LINE		(STMMAC_CACHE_LINE / 16)
+ 
+ /*
+- * Cache maintenance for DMA buffers. These are no-ops: the DMA is assumed
+- * to be coherent with the CPU caches. A platform whose DMA is not coherent
+- * provides the implementation (see the cache maintenance patch).
+- */
+-static inline void
+-stmmac_dcache_clean(const void *addr, size_t len)
+-{
+-	RTE_SET_USED(addr);
+-	RTE_SET_USED(len);
+-}
+-
+-static inline void
+-stmmac_dcache_flush(const void *addr, size_t len)
+-{
+-	RTE_SET_USED(addr);
+-	RTE_SET_USED(len);
+-}
+-
+-static inline void
+-stmmac_dcache_inval_line(const void *addr)
+-{
+-	RTE_SET_USED(addr);
++ * Cache maintenance for a non-coherent DMA (arm64). Clean writes CPU-written
++ * lines back so the DMA reads them; flush also discards CPU copies before the
++ * CPU reads DMA write-back. dsb orders the maintenance before the DMA sees it.
++ */
++static inline void
++stmmac_dcache_clean(const void *addr, size_t len)
++{
++	uintptr_t p = (uintptr_t)addr & ~(uintptr_t)(STMMAC_CACHE_LINE - 1);
++	uintptr_t end = (uintptr_t)addr + len;
++
++	for (; p < end; p += STMMAC_CACHE_LINE)
++		asm volatile("dc cvac, %0" : : "r"(p) : "memory");
++	asm volatile("dsb sy" : : : "memory");
++}
++
++static inline void
++stmmac_dcache_flush(const void *addr, size_t len)
++{
++	uintptr_t p = (uintptr_t)addr & ~(uintptr_t)(STMMAC_CACHE_LINE - 1);
++	uintptr_t end = (uintptr_t)addr + len;
++
++	for (; p < end; p += STMMAC_CACHE_LINE)
++		asm volatile("dc civac, %0" : : "r"(p) : "memory");
++	asm volatile("dsb sy" : : : "memory");
++}
++
++static inline void
++stmmac_dcache_inval_line(const void *addr)
++{
++	asm volatile("dc civac, %0" : : "r"(addr) : "memory");
+ 	rte_io_rmb();
+ }
+ 
